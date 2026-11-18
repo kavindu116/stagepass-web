@@ -1,35 +1,78 @@
 /**
- * API layer. Pages import from here, never from mock-data directly,
- * so switching to the Spring Boot backend is a one-file change.
+ * API layer. Pages import from here, never from mock-data directly.
  *
- * When the backend is ready, set NEXT_PUBLIC_API_URL (e.g. http://localhost:8080/api)
- * and replace each mock return with a fetch, e.g.:
+ * LIVE (Spring Boot):  fetchEvents, fetchEvent
+ * STILL MOCK:          fetchSeatMap  (Phase 2: seats + Redis holds)
+ *                      fetchMyBookings (Phase 3/5: orders + auth)
  *
- *   const res = await fetch(`${API_URL}/events/${id}`, { cache: "no-store" });
- *   if (!res.ok) return undefined;
- *   return res.json();
- *
- * Planned endpoints (from the booking flow):
- *   GET  /events                     -> EventItem[]
- *   GET  /events/{id}                -> EventItem
- *   GET  /events/{id}/seats          -> SeatRow[]   (+ WS topic /topic/event/{id}/seats)
- *   POST /holds                      -> { holdId, expiresAt }   (Redis SET NX EX 600)
- *   POST /orders                     -> { orderId, status: "PENDING" }
- *   POST /payments/webhook           (gateway -> backend, idempotent)
- *   GET  /me/bookings                -> Booking[]
+ * These run in Server Components, i.e. on the Next.js server -> the browser never
+ * calls the backend directly for these, so CORS doesn't apply here.
  */
+import {
+  toEventItemFromDetail,
+  toEventItemFromSummary,
+  type ApiEventDetail,
+  type ApiEventSummary,
+  type ApiPage,
+} from "./adapters";
 import * as mock from "./mock-data";
-import type { Booking, EventItem, SeatRow } from "./types";
+import type { Booking, Category, EventItem, SeatRow } from "./types";
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
+export const API_URL = (process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080").replace(/\/$/, "");
 
-export async function fetchEvents(): Promise<EventItem[]> {
-  return mock.getEvents();
+export class ApiError extends Error {
+  constructor(
+      message: string,
+      public readonly status?: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
 }
 
-export async function fetchEvent(id: string): Promise<EventItem | undefined> {
-  return mock.getEvent(id);
+async function apiGet<T>(path: string): Promise<T | undefined> {
+  let res: Response;
+  try {
+    // no-store: seat availability changes all the time, never serve a cached copy
+    res = await fetch(`${API_URL}${path}`, { cache: "no-store", headers: { Accept: "application/json" } });
+  } catch {
+    throw new ApiError(`Cannot reach the Stagepass API at ${API_URL}. Is the backend running?`);
+  }
+  if (res.status === 404) return undefined;
+  if (!res.ok) {
+    // Spring returns RFC 9457 problem details: { title, status, detail }
+    const problem = await res.json().catch(() => null);
+    throw new ApiError(problem?.detail ?? `API error ${res.status} for ${path}`, res.status);
+  }
+  return (await res.json()) as T;
 }
+
+export interface EventQuery {
+  category?: Category;
+  city?: string;
+  q?: string;
+  maxPrice?: number;
+  size?: number;
+}
+
+export async function fetchEvents(query: EventQuery = {}): Promise<EventItem[]> {
+  const params = new URLSearchParams();
+  if (query.category) params.set("category", query.category);
+  if (query.city) params.set("city", query.city);
+  if (query.q) params.set("q", query.q);
+  if (query.maxPrice !== undefined) params.set("maxPrice", String(query.maxPrice));
+  params.set("size", String(query.size ?? 50));
+
+  const page = await apiGet<ApiPage<ApiEventSummary>>(`/api/events?${params}`);
+  return (page?.content ?? []).map(toEventItemFromSummary);
+}
+
+export async function fetchEvent(slug: string): Promise<EventItem | undefined> {
+  const detail = await apiGet<ApiEventDetail>(`/api/events/${encodeURIComponent(slug)}`);
+  return detail ? toEventItemFromDetail(detail) : undefined;
+}
+
+// ---------- still mock ----------
 
 export async function fetchSeatMap(eventId: string): Promise<SeatRow[]> {
   return mock.getSeatMap(eventId);

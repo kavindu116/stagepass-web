@@ -4,12 +4,12 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { TimerIcon } from "./icons";
 
-const STORAGE_KEY = "stagepass.holdExpiresAt";
+const EXPIRES_KEY = "stagepass.holdExpiresAt";
+const HOLD_KEY = "stagepass.holdId";
 
 /**
- * Countdown for the 10-minute seat hold.
- * Mirrors the Redis TTL on the backend. When the real API exists, use the
- * `expiresAt` returned by POST /holds instead of the sessionStorage fallback.
+ * Countdown for the seat hold. The expiry comes from the backend (POST /api/holds -> expiresAt),
+ * which matches the Redis TTL, so when this hits 00:00 the seats really are released.
  */
 export function HoldTimer({ expiresAt, eventId }: { expiresAt?: number; eventId?: string }) {
   const [remaining, setRemaining] = useState<number | null>(null);
@@ -18,9 +18,8 @@ export function HoldTimer({ expiresAt, eventId }: { expiresAt?: number; eventId?
     let target = expiresAt;
     if (!target) {
       try {
-        const saved = Number(sessionStorage.getItem(STORAGE_KEY));
-        target = saved > Date.now() ? saved : Date.now() + 10 * 60 * 1000;
-        sessionStorage.setItem(STORAGE_KEY, String(target));
+        const saved = Number(sessionStorage.getItem(EXPIRES_KEY));
+        target = saved > 0 ? saved : Date.now() + 10 * 60 * 1000;
       } catch {
         target = Date.now() + 10 * 60 * 1000;
       }
@@ -60,17 +59,28 @@ export function HoldTimer({ expiresAt, eventId }: { expiresAt?: number; eventId?
   );
 }
 
-export function startHold() {
+/** Remember the active hold (expiry for the timer, id so it can be released on "Change seats"). */
+export function startHold(expiresAtIso: string, holdId: string) {
   try {
-    sessionStorage.setItem(STORAGE_KEY, String(Date.now() + 10 * 60 * 1000));
+    sessionStorage.setItem(EXPIRES_KEY, String(Date.parse(expiresAtIso)));
+    sessionStorage.setItem(HOLD_KEY, holdId);
   } catch {
-    /* storage unavailable — timer falls back to a fresh 10 minutes */
+    /* storage unavailable — timer falls back to 10 minutes */
+  }
+}
+
+export function getStoredHoldId(): string | null {
+  try {
+    return sessionStorage.getItem(HOLD_KEY);
+  } catch {
+    return null;
   }
 }
 
 export function clearHold() {
   try {
-    sessionStorage.removeItem(STORAGE_KEY);
+    sessionStorage.removeItem(EXPIRES_KEY);
+    sessionStorage.removeItem(HOLD_KEY);
   } catch {
     /* ignore */
   }

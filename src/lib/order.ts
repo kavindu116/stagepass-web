@@ -1,10 +1,11 @@
-import { fetchEvent } from "./api";
+import { holdSeatToTier } from "./adapters";
+import { fetchEvent, fetchHold } from "./api";
 import { firstParam, parseSeatIds } from "./format";
 import { tierForSeat } from "./mock-data";
 import type { EventItem, Tier } from "./types";
 
 export interface OrderLine {
-  seatId: string;
+  seatId: string; // "C7"
   tier: Tier;
 }
 
@@ -12,16 +13,34 @@ export interface OrderDraft {
   event: EventItem;
   lines: OrderLine[];
   subtotal: number;
-  query: string; // "event=..&seats=.." to carry the order between steps
+  query: string; // carries the order between checkout steps
+  expiresAt?: number; // ms epoch, from the real hold
 }
 
 /**
- * Rebuilds the order from ?event=&seats= query params.
- * With the real backend this becomes GET /orders/{orderId}.
+ * Builds the checkout summary.
+ *  - ?hold={holdId}         -> REAL: seats + prices come from the Redis hold (GET /api/holds/{id})
+ *  - ?event=..&seats=C7,C8  -> legacy mock path (still used by "View QR" on My Tickets until Phase 3)
+ * Phase 3 replaces this with GET /api/orders/{orderId}.
  */
 export async function loadOrderDraft(
   sp: Record<string, string | string[] | undefined>,
 ): Promise<OrderDraft | null> {
+  const holdId = firstParam(sp.hold);
+  if (holdId) {
+    const hold = await fetchHold(holdId);
+    if (!hold) return null; // expired or unknown
+    const event = await fetchEvent(hold.eventSlug);
+    if (!event) return null;
+    return {
+      event,
+      lines: hold.seats.map((s) => ({ seatId: s.label, tier: holdSeatToTier(s) })),
+      subtotal: hold.subtotal,
+      query: `hold=${encodeURIComponent(holdId)}`,
+      expiresAt: Date.parse(hold.expiresAt),
+    };
+  }
+
   const eventId = firstParam(sp.event);
   const seatIds = parseSeatIds(firstParam(sp.seats));
   if (!eventId || seatIds.length === 0) return null;

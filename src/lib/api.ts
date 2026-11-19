@@ -1,19 +1,19 @@
 /**
- * API layer. Pages import from here, never from mock-data directly.
+ * Server-side API layer (used by Server Components — runs on the Next.js server).
+ * Browser-side calls (seat polling, POST /holds) live in client-api.ts.
  *
- * LIVE (Spring Boot):  fetchEvents, fetchEvent
- * STILL MOCK:          fetchSeatMap  (Phase 2: seats + Redis holds)
- *                      fetchMyBookings (Phase 3/5: orders + auth)
- *
- * These run in Server Components, i.e. on the Next.js server -> the browser never
- * calls the backend directly for these, so CORS doesn't apply here.
+ * LIVE:        events, event details, seat map, holds
+ * STILL MOCK:  fetchMyBookings (Phase 3/5: orders + auth)
  */
 import {
   toEventItemFromDetail,
   toEventItemFromSummary,
+  toSeatRows,
   type ApiEventDetail,
   type ApiEventSummary,
+  type ApiHold,
   type ApiPage,
+  type ApiSeatMap,
 } from "./adapters";
 import * as mock from "./mock-data";
 import type { Booking, Category, EventItem, SeatRow } from "./types";
@@ -22,8 +22,8 @@ export const API_URL = (process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL ?
 
 export class ApiError extends Error {
   constructor(
-      message: string,
-      public readonly status?: number,
+    message: string,
+    public readonly status?: number,
   ) {
     super(message);
     this.name = "ApiError";
@@ -72,11 +72,26 @@ export async function fetchEvent(slug: string): Promise<EventItem | undefined> {
   return detail ? toEventItemFromDetail(detail) : undefined;
 }
 
-// ---------- still mock ----------
-
-export async function fetchSeatMap(eventId: string): Promise<SeatRow[]> {
-  return mock.getSeatMap(eventId);
+export interface SeatMapData {
+  showId: number;
+  maxSeatsPerOrder: number;
+  rows: SeatRow[];
 }
+
+export async function fetchSeatMap(showId: string | number): Promise<SeatMapData | undefined> {
+  const map = await apiGet<ApiSeatMap>(`/api/shows/${encodeURIComponent(String(showId))}/seats`);
+  return map ? { showId: map.showId, maxSeatsPerOrder: map.maxSeatsPerOrder, rows: toSeatRows(map) } : undefined;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** undefined when the hold doesn't exist or has expired. */
+export async function fetchHold(holdId: string): Promise<ApiHold | undefined> {
+  if (!UUID_RE.test(holdId)) return undefined;
+  return apiGet<ApiHold>(`/api/holds/${holdId}`);
+}
+
+// ---------- still mock ----------
 
 export async function fetchMyBookings(): Promise<Booking[]> {
   return mock.BOOKINGS;

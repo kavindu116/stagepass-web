@@ -4,7 +4,7 @@
  * everything display-specific (Colombo time, "SAT 14 DEC", labels) happens here.
  * Pages keep using EventItem, so none of them had to change.
  */
-import type { Category, EventItem, EventStatus, Show, Tier } from "./types";
+import type { Category, EventItem, EventStatus, SeatRow, SeatStatus, Show, Tier } from "./types";
 
 // ---------- Backend response shapes (match the Java records) ----------
 
@@ -203,4 +203,53 @@ export function toEventItemFromDetail(e: ApiEventDetail): EventItem {
     shows: e.shows.map(toShow),
     tiers: e.tiers.map(toTier),
   };
+}
+
+// ---------- Seats & holds (Phase 2) ----------
+
+export type ApiSeatState = "AVAILABLE" | "HELD" | "SOLD" | "BLOCKED";
+
+export interface ApiSeatMap {
+  showId: number;
+  eventSlug: string;
+  maxSeatsPerOrder: number;
+  rows: {
+    label: string;
+    seats: { id: number; label: string; row: string; number: number; posX: number; tier: string; status: ApiSeatState }[];
+  }[];
+}
+
+export interface ApiHold {
+  holdId: string;
+  showId: number;
+  eventSlug: string;
+  expiresAt: string;
+  seats: { id: number; label: string; tier: string; price: number; color: string }[];
+  subtotal: number;
+}
+
+const SEAT_STATUS: Record<ApiSeatState, SeatStatus> = {
+  AVAILABLE: "available",
+  HELD: "held",
+  SOLD: "sold",
+  BLOCKED: "sold", // not sellable -> drawn like sold
+};
+
+export function toSeatRows(map: ApiSeatMap): SeatRow[] {
+  return map.rows.map((r) => ({
+    label: r.label,
+    seats: r.seats.map((s) => ({
+      id: s.label,
+      row: s.row,
+      number: s.number,
+      tierId: s.tier.toLowerCase(), // matches toTier() ids
+      status: SEAT_STATUS[s.status],
+      showSeatId: s.id,
+      posX: s.posX,
+    })),
+  }));
+}
+
+export function holdSeatToTier(s: ApiHold["seats"][number]): Tier {
+  return { id: s.tier.toLowerCase(), name: s.tier, price: s.price, color: s.color, remaining: "" };
 }

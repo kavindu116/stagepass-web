@@ -41,11 +41,13 @@ export interface EventItem {
 export type SeatStatus = "available" | "held" | "sold";
 
 export interface Seat {
-  id: string; // "C7"
+  id: string; // "C7" (label shown to the user)
   row: string; // "C"
   number: number; // 7
   tierId: string;
   status: SeatStatus;
+  showSeatId?: number; // backend id, sent in POST /api/holds
+  posX?: number; // grid column; a jump > 1 between neighbours = aisle
 }
 
 export interface SeatRow {

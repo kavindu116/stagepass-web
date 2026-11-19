@@ -1,31 +1,35 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { CloseIcon, InfoIcon } from "./icons";
-import { startHold } from "./HoldTimer";
-import { AISLE_BEFORE } from "@/lib/mock-data";
+import { clearHold, getStoredHoldId, startHold } from "./HoldTimer";
+import { createHold, getSeatRows, releaseHold } from "@/lib/client-api";
 import { formatLKR } from "@/lib/format";
 import type { Seat, SeatRow, Tier } from "@/lib/types";
 
-const MAX_SEATS = 6;
+const POLL_MS = 5000;
 
 interface Props {
-  eventId: string;
-  rows: SeatRow[];
+  showId: number;
+  initialRows: SeatRow[];
   tiers: Tier[];
+  maxSeats: number;
 }
 
 /**
  * Live seat map.
- * TODO (backend): subscribe to /topic/event/{eventId}/seats over STOMP/WebSocket
- * and patch `rows` when other users hold / buy seats. On "Hold seats", call
- * POST /holds — a 409 means someone else won the Redis SET NX race.
+ * - Polls GET /api/shows/{id}/seats every 5s so seats other people take turn grey.
+ *   (Phase 2b: replace polling with a WebSocket push.)
+ * - "Hold seats" -> POST /api/holds. The backend holds all seats or none (Redis Lua);
+ *   a 409 means someone was faster, so we drop those seats and refresh.
  */
-export function SeatMap({ eventId, rows, tiers }: Props) {
+export function SeatMap({ showId, initialRows, tiers, maxSeats }: Props) {
   const router = useRouter();
+  const [rows, setRows] = useState<SeatRow[]>(initialRows);
   const [selected, setSelected] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const tierById = useMemo(() => Object.fromEntries(tiers.map((t) => [t.id, t])), [tiers]);
   const seatById = useMemo(() => {
@@ -34,22 +38,67 @@ export function SeatMap({ eventId, rows, tiers }: Props) {
     return m;
   }, [rows]);
 
-  const picked = selected.map((id) => ({ seat: seatById[id], tier: tierById[seatById[id].tierId] }));
-  const total = picked.reduce((sum, p) => sum + p.tier.price, 0);
+  const refresh = useCallback(async () => {
+    const res = await getSeatRows(showId);
+    if (!res.ok) return;
+    setRows(res.data);
+    // If someone else took a seat I had selected (not held yet), drop it and say so.
+    const taken = new Set(res.data.flatMap((r) => r.seats.filter((s) => s.status !== "available").map((s) => s.id)));
+    setSelected((cur) => {
+      const lost = cur.filter((id) => taken.has(id));
+      if (lost.length) setNotice(`Seat ${lost.join(", ")} was just taken by someone else.`);
+      return lost.length ? cur.filter((id) => !taken.has(id)) : cur;
+    });
+  }, [showId]);
+
+  // Coming back from checkout ("Change seats")? Release the old hold so those seats aren't blocked for me.
+  useEffect(() => {
+    const previous = getStoredHoldId();
+    if (!previous) return;
+    clearHold();
+    releaseHold(previous).then(refresh);
+  }, [refresh]);
+
+  useEffect(() => {
+    const id = setInterval(refresh, POLL_MS);
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  const picked = selected
+    .filter((id) => seatById[id])
+    .map((id) => ({ seat: seatById[id], tier: tierById[seatById[id].tierId] }));
+  const total = picked.reduce((sum, p) => sum + (p.tier?.price ?? 0), 0);
 
   function toggle(seat: Seat) {
     if (seat.status !== "available") return;
+    setNotice(null);
     setSelected((cur) =>
-      cur.includes(seat.id) ? cur.filter((x) => x !== seat.id) : cur.length < MAX_SEATS ? [...cur, seat.id] : cur,
+      cur.includes(seat.id) ? cur.filter((x) => x !== seat.id) : cur.length < maxSeats ? [...cur, seat.id] : cur,
     );
   }
 
-  function holdAndContinue() {
-    if (!selected.length) return;
+  async function holdAndContinue() {
+    const seatIds = picked.map((p) => p.seat.showSeatId).filter((id): id is number => id !== undefined);
+    if (!seatIds.length) return;
     setSubmitting(true);
-    // Replace with: await fetch(`${API_URL}/holds`, { method: "POST", body: JSON.stringify({ eventId, seatIds: selected }) })
-    startHold();
-    router.push(`/checkout?event=${encodeURIComponent(eventId)}&seats=${selected.join(",")}`);
+    setNotice(null);
+
+    const res = await createHold(showId, seatIds);
+    if (res.ok) {
+      startHold(res.data.expiresAt, res.data.holdId);
+      router.push(`/checkout?hold=${res.data.holdId}`);
+      return;
+    }
+
+    setSubmitting(false);
+    if (res.problem.status === 409) {
+      const lost = res.problem.seats ?? [];
+      setSelected((cur) => cur.filter((id) => !lost.includes(id)));
+      setNotice(`Sorry — ${lost.length ? `seat ${lost.join(", ")}` : "a seat"} was taken just before you. Please pick another.`);
+      refresh();
+    } else {
+      setNotice(res.problem.detail ?? "Couldn't hold your seats. Please try again.");
+    }
   }
 
   return (
@@ -65,31 +114,42 @@ export function SeatMap({ eventId, rows, tiers }: Props) {
             {rows.map((row) => (
               <div key={row.label} className="flex items-center gap-1.5">
                 <span className="w-[22px] text-center text-[13px] font-bold text-muted">{row.label}</span>
-                {row.seats.map((seat) => (
-                  <SeatButton
-                    key={seat.id}
-                    seat={seat}
-                    tier={tierById[seat.tierId]}
-                    selected={selected.includes(seat.id)}
-                    aisle={AISLE_BEFORE.includes(seat.number)}
-                    onClick={() => toggle(seat)}
-                  />
-                ))}
+                {row.seats.map((seat, i) => {
+                  const prev = row.seats[i - 1];
+                  const aisle = !!prev && seat.posX !== undefined && prev.posX !== undefined && seat.posX - prev.posX > 1;
+                  return (
+                    <SeatButton
+                      key={seat.id}
+                      seat={seat}
+                      tier={tierById[seat.tierId]}
+                      selected={selected.includes(seat.id)}
+                      aisle={aisle}
+                      onClick={() => toggle(seat)}
+                    />
+                  );
+                })}
                 <span className="w-[22px] text-center text-[13px] font-bold text-muted">{row.label}</span>
               </div>
             ))}
           </div>
         </div>
 
-        <div className="flex items-center gap-3 rounded-xl border border-violet-line bg-violet-deep px-[18px] py-3.5 text-sm text-[#D6D0EA]" aria-live="polite">
-          <InfoIcon size={18} className="flex-none text-violet" />
-          Seat D9 was just taken by someone else. The map updates live.
-        </div>
+        {notice && (
+          <div
+            role="status"
+            className="flex items-center gap-3 rounded-xl border border-violet-line bg-violet-deep px-[18px] py-3.5 text-sm text-[#D6D0EA]"
+          >
+            <InfoIcon size={18} className="flex-none text-violet" />
+            {notice}
+          </div>
+        )}
       </main>
 
       <aside className="flex flex-[1_1_320px] flex-col gap-[18px] rounded-[20px] border border-line bg-surface p-[26px]">
         <strong className="font-display text-xl">Your seats</strong>
-        <span className="text-sm text-muted">{selected.length} of {MAX_SEATS} selected</span>
+        <span className="text-sm text-muted">
+          {selected.length} of {maxSeats} selected
+        </span>
 
         {picked.length === 0 ? (
           <div className="rounded-xl border border-dashed border-line-strong p-[22px] text-center text-[15px] text-muted">
@@ -98,12 +158,12 @@ export function SeatMap({ eventId, rows, tiers }: Props) {
         ) : (
           picked.map(({ seat, tier }) => (
             <div key={seat.id} className="flex items-center gap-3 border-b border-line pb-3.5">
-              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: tier.color }} />
+              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: tier?.color }} />
               <div className="flex flex-1 flex-col">
                 <strong>Seat {seat.id}</strong>
-                <span className="text-[13px] text-muted">{tier.name}</span>
+                <span className="text-[13px] text-muted">{tier?.name}</span>
               </div>
-              <strong>{formatLKR(tier.price)}</strong>
+              <strong>{formatLKR(tier?.price ?? 0)}</strong>
               <button
                 type="button"
                 aria-label={`Remove seat ${seat.id}`}
@@ -129,7 +189,7 @@ export function SeatMap({ eventId, rows, tiers }: Props) {
           {submitting ? "Holding seats…" : "Hold seats & continue"}
         </button>
         <span className="text-center text-[13px] leading-normal text-muted">
-          Your seats are held for 10 minutes after you continue. Max {MAX_SEATS} per booking.
+          Your seats are held for 10 minutes after you continue. Max {maxSeats} per booking.
         </span>
       </aside>
     </div>
@@ -144,7 +204,7 @@ function SeatButton({
   onClick,
 }: {
   seat: Seat;
-  tier: Tier;
+  tier: Tier | undefined;
   selected: boolean;
   aisle: boolean;
   onClick: () => void;
@@ -159,7 +219,7 @@ function SeatButton({
   else if (selected) cls += "border-ink bg-ink text-accent-ink";
   else {
     cls += "bg-transparent hover:bg-white/10";
-    style = { borderColor: tier.color };
+    style = { borderColor: tier?.color };
   }
 
   return (
@@ -168,8 +228,8 @@ function SeatButton({
       onClick={onClick}
       disabled={disabled}
       aria-pressed={selected}
-      aria-label={`Seat ${seat.id}, ${tier.name}, ${stateLabel}`}
-      title={`${seat.id} · ${tier.name} · ${formatLKR(tier.price)}`}
+      aria-label={`Seat ${seat.id}, ${tier?.name ?? ""}, ${stateLabel}`}
+      title={`${seat.id} · ${tier?.name ?? ""} · ${formatLKR(tier?.price ?? 0)}`}
       className={`${cls} ${aisle ? "ml-[22px]" : ""}`}
       style={style}
     >

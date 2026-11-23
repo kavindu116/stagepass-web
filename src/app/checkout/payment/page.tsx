@@ -5,8 +5,9 @@ import { CheckoutSteps } from "@/components/CheckoutSteps";
 import { HoldTimer } from "@/components/HoldTimer";
 import { OrderSummary } from "@/components/OrderSummary";
 import { PaymentForm } from "@/components/PaymentForm";
+import { formatShowTime } from "@/lib/adapters";
+import { fetchOrder } from "@/lib/api";
 import { firstParam, formatLKR } from "@/lib/format";
-import { loadOrderDraft } from "@/lib/order";
 
 export const metadata: Metadata = { title: "Payment" };
 
@@ -14,9 +15,13 @@ type SP = Promise<Record<string, string | string[] | undefined>>;
 
 export default async function PaymentPage({ searchParams }: { searchParams: SP }) {
   const sp = await searchParams;
-  const order = await loadOrderDraft(sp);
+  const order = await fetchOrder(firstParam(sp.order) ?? "");
   if (!order) redirect("/events");
-  const failed = firstParam(sp.status) === "failed";
+  if (order.status === "CONFIRMED") redirect(`/booking/${order.orderRef}`);
+
+  const cancelled = firstParam(sp.status) === "cancelled";
+  const d = formatShowTime(order.showStartsAt);
+  const payable = order.status === "PENDING" && Date.parse(order.holdExpiresAt) > Date.now();
 
   return (
     <>
@@ -26,35 +31,54 @@ export default async function PaymentPage({ searchParams }: { searchParams: SP }
             stage<span className="text-accent">pass</span>
           </span>
           <CheckoutSteps current={3} />
-          <HoldTimer eventId={order.event.id} />
+          {payable && <HoldTimer eventId={order.eventSlug} expiresAt={Date.parse(order.holdExpiresAt)} />}
         </div>
       </header>
 
       <div className="mx-auto flex max-w-7xl flex-wrap items-start gap-8 px-6 pb-16 pt-9">
         <main className="flex min-w-0 flex-[999_1_560px] flex-col gap-6">
-          <h1 className="font-display text-[34px] font-bold tracking-tight">How would you like to pay?</h1>
+          <h1 className="font-display text-[34px] font-bold tracking-tight">Payment</h1>
+          <p className="text-sm text-muted">Order <strong className="text-ink">#{order.orderRef}</strong></p>
 
-          {failed && (
+          {cancelled && payable && (
             <div role="alert" className="flex flex-col gap-2 rounded-[18px] border border-danger-line bg-danger-bg p-[22px]">
-              <strong className="text-[#FFD0D0]">Payment didn&apos;t go through</strong>
+              <strong className="text-[#FFD0D0]">Payment cancelled</strong>
               <span className="text-sm leading-normal text-[#E8BDBD]">
-                Your seats are still held until the timer runs out. Try again or use a different method.
+                Your seats are still held until the timer runs out. You can try again.
               </span>
             </div>
           )}
 
-          <PaymentForm
-            amountLabel={`${formatLKR(order.subtotal)} + fee`}
-            successHref={`/booking/SP-1001?${order.query}`}
-          />
-          <Link href={`/checkout?${order.query}`} className="text-center text-sm text-muted hover:text-ink">
-            ← Back to details
-          </Link>
+          {payable ? (
+            <PaymentForm orderRef={order.orderRef} amountLabel={formatLKR(order.total)} />
+          ) : (
+            <div className="flex flex-col gap-3 rounded-[18px] border border-line bg-surface p-7">
+              <strong className="text-lg">This order can no longer be paid</strong>
+              <span className="text-soft">
+                {order.status === "PENDING" || order.status === "EXPIRED"
+                  ? "Your 10-minute seat hold ran out, so the seats were released."
+                  : `Order status: ${order.status}.`}
+              </span>
+              <Link href={`/events/${order.eventSlug}/seats`} className="self-start rounded-xl bg-accent px-6 py-3.5 font-bold text-accent-ink hover:bg-accent-hover">
+                Pick seats again
+              </Link>
+            </div>
+          )}
         </main>
 
         <aside className="flex flex-[1_1_340px] flex-col gap-5">
           <div className="rounded-[18px] border border-line bg-surface p-[26px]">
-            <OrderSummary order={order} compact />
+            <OrderSummary
+              compact
+              title={order.eventTitle}
+              when={`${d.dateLabel} · ${d.time}`}
+              where={`${order.venue}, ${order.city}`}
+              tint={order.tintColor ?? "#33363F"}
+              lines={order.items.map((i) => ({ seat: i.seat, tier: i.tier, price: i.price }))}
+              subtotal={order.subtotal}
+              serviceFee={order.serviceFee}
+              total={order.total}
+            />
           </div>
         </aside>
       </div>

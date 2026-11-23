@@ -4,7 +4,7 @@
  * everything display-specific (Colombo time, "SAT 14 DEC", labels) happens here.
  * Pages keep using EventItem, so none of them had to change.
  */
-import type { Category, EventItem, EventStatus, SeatRow, SeatStatus, Show, Tier } from "./types";
+import type { Booking, Category, EventItem, EventStatus, SeatRow, SeatStatus, Show, Tier } from "./types";
 
 // ---------- Backend response shapes (match the Java records) ----------
 
@@ -228,7 +228,7 @@ export interface ApiHold {
   subtotal: number;
 }
 
-const SEAT_STATUS: Record<ApiSeatState, SeatStatus> = {
+export const SEAT_STATUS: Record<ApiSeatState, SeatStatus> = {
   AVAILABLE: "available",
   HELD: "held",
   SOLD: "sold",
@@ -252,4 +252,76 @@ export function toSeatRows(map: ApiSeatMap): SeatRow[] {
 
 export function holdSeatToTier(s: ApiHold["seats"][number]): Tier {
   return { id: s.tier.toLowerCase(), name: s.tier, price: s.price, color: s.color, remaining: "" };
+}
+
+/** One live update from GET /api/shows/{id}/seats/stream (event name "seats"). */
+export interface ApiSeatUpdate {
+  showId: number;
+  status: ApiSeatState;
+  seatIds: number[];
+}
+
+// ---------- Orders & payments (Phase 3) ----------
+
+export type ApiOrderStatus = "PENDING" | "CONFIRMED" | "EXPIRED" | "FAILED" | "CANCELLED" | "REFUNDED";
+
+export interface ApiOrder {
+  orderRef: string;
+  status: ApiOrderStatus;
+  eventSlug: string;
+  eventTitle: string;
+  tintColor: string | null;
+  showStartsAt: string;
+  doorsOpenAt: string | null;
+  venue: string;
+  city: string;
+  items: { seat: string; tier: string; price: number; color: string; attendeeName: string | null }[];
+  subtotal: number;
+  serviceFee: number;
+  discount: number;
+  total: number;
+  currency: string;
+  contactEmail: string;
+  holdExpiresAt: string;
+  confirmedAt: string | null;
+  tickets: { code: string; seat: string; tier: string; status: "VALID" | "USED" | "CANCELLED" }[];
+}
+
+export interface ApiMyOrder {
+  orderRef: string;
+  status: ApiOrderStatus;
+  eventSlug: string;
+  eventTitle: string;
+  tintColor: string | null;
+  showStartsAt: string;
+  venue: string;
+  city: string;
+  seats: string[];
+  seatSummary: string;
+  total: number;
+}
+
+export interface ApiPaymentSession {
+  mode: "SIMULATOR" | "SANDBOX";
+  actionUrl: string;
+  fields: Record<string, string>;
+}
+
+/** GET /api/me/orders row -> the existing "My Tickets" card model. */
+export function toBooking(o: ApiMyOrder, now: number = Date.now()): Booking {
+  const d = formatShowTime(o.showStartsAt);
+  const upcoming = Date.parse(o.showStartsAt) > now;
+  return {
+    id: o.orderRef,
+    eventId: o.eventSlug,
+    title: o.eventTitle,
+    day: d.day,
+    month: d.month,
+    venue: `${o.venue}, ${o.city}`,
+    time: d.time,
+    seatsLabel: `${o.seatSummary} · ${o.seats.join(", ")}`,
+    status: o.status === "REFUNDED" ? "REFUNDED" : upcoming ? "CONFIRMED" : "ATTENDED",
+    tint: o.tintColor ?? "#33363F",
+    upcoming: upcoming && o.status !== "REFUNDED",
+  };
 }

@@ -2,20 +2,21 @@
  * Server-side API layer (used by Server Components — runs on the Next.js server).
  * Browser-side calls (seat polling, POST /holds) live in client-api.ts.
  *
- * LIVE:        events, event details, seat map, holds
- * STILL MOCK:  fetchMyBookings (Phase 3/5: orders + auth)
+ * LIVE: events, event details, seat map, holds, orders, My Tickets
  */
 import {
+  toBooking,
   toEventItemFromDetail,
   toEventItemFromSummary,
   toSeatRows,
   type ApiEventDetail,
   type ApiEventSummary,
   type ApiHold,
+  type ApiMyOrder,
+  type ApiOrder,
   type ApiPage,
   type ApiSeatMap,
 } from "./adapters";
-import * as mock from "./mock-data";
 import type { Booking, Category, EventItem, SeatRow } from "./types";
 
 export const API_URL = (process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080").replace(/\/$/, "");
@@ -91,8 +92,16 @@ export async function fetchHold(holdId: string): Promise<ApiHold | undefined> {
   return apiGet<ApiHold>(`/api/holds/${holdId}`);
 }
 
-// ---------- still mock ----------
+const ORDER_REF_RE = /^SP-[A-Z0-9]{6}$/;
 
+/** undefined when the order doesn't exist. */
+export async function fetchOrder(orderRef: string): Promise<ApiOrder | undefined> {
+  if (!ORDER_REF_RE.test(orderRef)) return undefined;
+  return apiGet<ApiOrder>(`/api/orders/${orderRef}`);
+}
+
+/** My Tickets (the signed-in user's confirmed orders). */
 export async function fetchMyBookings(): Promise<Booking[]> {
-  return mock.BOOKINGS;
+  const orders = await apiGet<ApiMyOrder[]>("/api/me/orders");
+  return (orders ?? []).map((o) => toBooking(o));
 }

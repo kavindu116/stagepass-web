@@ -1,25 +1,58 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { redirect } from "next/navigation";
+import { notFound } from "next/navigation";
+import { BookingPoller } from "@/components/BookingPoller";
 import { Header } from "@/components/Header";
 import { CheckIcon } from "@/components/icons";
 import { QrCode } from "@/components/QrCode";
+import { formatShowTime } from "@/lib/adapters";
+import { fetchOrder } from "@/lib/api";
 import { formatLKR } from "@/lib/format";
-import { loadOrderDraft } from "@/lib/order";
 
-export const metadata: Metadata = { title: "Booking confirmed" };
+export const metadata: Metadata = { title: "Your booking" };
 
-type Props = {
-  params: Promise<{ id: string }>;
-  searchParams: Promise<Record<string, string | string[] | undefined>>;
-};
-
-/** TODO (backend): GET /bookings/{id} -> tickets with signed QR tokens. */
-export default async function BookingConfirmedPage({ params, searchParams }: Props) {
+export default async function BookingPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const order = await loadOrderDraft(await searchParams);
-  if (!order) redirect("/tickets");
-  const { event, lines, subtotal } = order;
+  const order = await fetchOrder(id);
+  if (!order) notFound();
+
+  const d = formatShowTime(order.showStartsAt);
+  const doors = order.doorsOpenAt ? formatShowTime(order.doorsOpenAt).time : null;
+  const tint = order.tintColor ?? "#4B2E83";
+
+  if (order.status === "PENDING") {
+    return (
+      <>
+        <Header showSearch={false} />
+        <main className="mx-auto flex max-w-xl flex-col items-center gap-4 px-6 py-24 text-center" aria-live="polite">
+          <div className="h-[52px] w-[52px] animate-spin rounded-full border-[3px] border-line border-t-accent" />
+          <h1 className="font-display text-3xl font-bold">Confirming your payment…</h1>
+          <p className="text-soft">Waiting for confirmation from PayHere. This page updates by itself.</p>
+          <BookingPoller />
+        </main>
+      </>
+    );
+  }
+
+  if (order.status !== "CONFIRMED") {
+    const refund = order.status === "FAILED";
+    return (
+      <>
+        <Header showSearch={false} />
+        <main className="mx-auto flex max-w-xl flex-col items-center gap-4 px-6 py-24 text-center">
+          <h1 className="font-display text-3xl font-bold">{refund ? "We couldn't complete this booking" : "This order has expired"}</h1>
+          <p className="text-soft">
+            {refund
+              ? "Your payment went through, but the seats were taken before it was confirmed. You'll get a full refund."
+              : "The seat hold ran out before payment was completed. No money was taken."}
+          </p>
+          <Link href={`/events/${order.eventSlug}/seats`} className="rounded-xl bg-accent px-6 py-3.5 font-bold text-accent-ink hover:bg-accent-hover">
+            Pick seats again
+          </Link>
+        </main>
+      </>
+    );
+  }
 
   return (
     <>
@@ -31,32 +64,32 @@ export default async function BookingConfirmedPage({ params, searchParams }: Pro
           </div>
           <h1 className="font-display text-[42px] font-bold tracking-tight">You&apos;re going!</h1>
           <p className="text-[17px] text-soft">
-            Booking <strong className="text-ink">#{id}</strong> confirmed. We&apos;ve emailed your tickets.
+            Booking <strong className="text-ink">#{order.orderRef}</strong> confirmed. Tickets go to {order.contactEmail}.
           </p>
         </div>
 
         <div className="grid grid-cols-[repeat(auto-fit,minmax(300px,1fr))] gap-6">
-          {lines.map((l) => (
-            <article key={l.seatId} className="flex flex-col overflow-hidden rounded-[20px] border border-line bg-surface">
-              <div className="flex flex-col gap-1 px-6 py-[22px]" style={{ backgroundColor: event.tint }}>
-                <span className="text-xs tracking-wider text-violet-tint">E-TICKET · {l.tier.name.toUpperCase()}</span>
-                <strong className="font-display text-[22px]">{event.title}</strong>
-                <span className="text-sm text-violet-tint">{event.dateLabel} · Doors {event.doors}</span>
+          {order.tickets.map((t) => (
+            <article key={t.code} className="flex flex-col overflow-hidden rounded-[20px] border border-line bg-surface">
+              <div className="flex flex-col gap-1 px-6 py-[22px]" style={{ backgroundColor: tint }}>
+                <span className="text-xs tracking-wider text-violet-tint">E-TICKET · {t.tier.toUpperCase()}</span>
+                <strong className="font-display text-[22px]">{order.eventTitle}</strong>
+                <span className="text-sm text-violet-tint">{d.dateLabel}{doors ? ` · Doors ${doors}` : ` · ${d.time}`}</span>
               </div>
               <div className="flex flex-wrap items-center gap-6 p-6">
-                <QrCode label={`QR code for seat ${l.seatId}`} />
+                <QrCode label={`QR code for seat ${t.seat}`} />
                 <div className="grid flex-[1_1_120px] grid-cols-2 gap-3.5">
                   <div>
                     <span className="text-xs tracking-wide text-muted">ROW</span>
-                    <div className="font-display text-[26px] font-bold">{l.seatId.charAt(0)}</div>
+                    <div className="font-display text-[26px] font-bold">{t.seat.replace(/\d+$/, "")}</div>
                   </div>
                   <div>
                     <span className="text-xs tracking-wide text-muted">SEAT</span>
-                    <div className="font-display text-[26px] font-bold">{l.seatId.slice(1)}</div>
+                    <div className="font-display text-[26px] font-bold">{t.seat.replace(/^\D+/, "")}</div>
                   </div>
                   <div className="col-span-2">
-                    <span className="text-xs tracking-wide text-muted">GATE</span>
-                    <div className="text-[15px]">[Gate / entrance]</div>
+                    <span className="text-xs tracking-wide text-muted">TICKET</span>
+                    <div className="truncate font-mono text-xs text-soft" title={t.code}>{t.code.slice(0, 8).toUpperCase()}</div>
                   </div>
                 </div>
               </div>
@@ -71,9 +104,9 @@ export default async function BookingConfirmedPage({ params, searchParams }: Pro
         </div>
 
         <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-[18px] rounded-2xl border border-line bg-surface px-[26px] py-[22px] text-[15px]">
-          <div><span className="text-[13px] text-muted">Paid</span><div><strong>{formatLKR(subtotal)} + fee</strong></div></div>
-          <div><span className="text-[13px] text-muted">Method</span><div>Card ending ••[XXXX]</div></div>
-          <div><span className="text-[13px] text-muted">Venue</span><div>{event.venue}, {event.city}</div></div>
+          <div><span className="text-[13px] text-muted">Paid</span><div><strong>{formatLKR(order.total)}</strong></div></div>
+          <div><span className="text-[13px] text-muted">Includes fee</span><div>{formatLKR(order.serviceFee)}</div></div>
+          <div><span className="text-[13px] text-muted">Venue</span><div>{order.venue}, {order.city}</div></div>
         </div>
       </main>
     </>

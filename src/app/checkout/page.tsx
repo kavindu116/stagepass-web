@@ -13,8 +13,9 @@ export const metadata: Metadata = { title: "Checkout" };
 type SP = Promise<Record<string, string | string[] | undefined>>;
 
 export default async function CheckoutPage({ searchParams }: { searchParams: SP }) {
-  const order = await loadOrderDraft(await searchParams);
-  if (!order) redirect("/events");
+  const draft = await loadOrderDraft(await searchParams);
+  if (!draft) redirect("/events");
+  const { event } = draft;
 
   return (
     <>
@@ -24,7 +25,7 @@ export default async function CheckoutPage({ searchParams }: { searchParams: SP 
             stage<span className="text-accent">pass</span>
           </span>
           <CheckoutSteps current={2} />
-          <HoldTimer eventId={order.event.id} />
+          <HoldTimer eventId={event.id} expiresAt={draft.expiresAt} />
         </div>
       </header>
 
@@ -32,14 +33,22 @@ export default async function CheckoutPage({ searchParams }: { searchParams: SP 
         <main className="flex min-w-0 flex-[999_1_560px] flex-col gap-6">
           <h1 className="font-display text-[34px] font-bold tracking-tight">Checkout</h1>
           <CheckoutForm
-            seatIds={order.lines.map((l) => l.seatId)}
-            nextHref={`/checkout/payment?${order.query}`}
+            holdId={draft.holdId}
+            eventId={event.id}
+            seatIds={draft.lines.map((l) => l.seatId)}
             defaultName={CURRENT_USER.name}
           />
         </main>
 
         <aside className="flex flex-[1_1_340px] flex-col gap-[18px] rounded-[18px] border border-line bg-surface p-[26px]">
-          <OrderSummary order={order} />
+          <OrderSummary
+            title={event.title}
+            when={`${event.dateLabel} · ${event.time}`}
+            where={`${event.venue}, ${event.city}`}
+            tint={event.tint}
+            lines={draft.lines.map((l) => ({ seat: l.seatId, tier: l.tier.name, price: l.tier.price }))}
+            subtotal={draft.subtotal}
+          />
           <div className="flex gap-2">
             <label htmlFor="promo" className="sr-only">Promo code</label>
             <input id="promo" placeholder="Promo code" className="field h-[46px] min-w-0 flex-1" />
@@ -52,7 +61,7 @@ export default async function CheckoutPage({ searchParams }: { searchParams: SP 
           >
             Continue to payment
           </button>
-          <Link href={`/events/${order.event.id}/seats`} className="text-center text-sm text-muted hover:text-ink">
+          <Link href={`/events/${event.id}/seats`} className="text-center text-sm text-muted hover:text-ink">
             Change seats
           </Link>
         </aside>

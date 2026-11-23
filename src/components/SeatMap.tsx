@@ -1,14 +1,16 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CloseIcon, InfoIcon } from "./icons";
 import { clearHold, getStoredHoldId, startHold } from "./HoldTimer";
-import { createHold, getSeatRows, releaseHold } from "@/lib/client-api";
+import { SEAT_STATUS, type ApiSeatUpdate } from "@/lib/adapters";
+import { createHold, getSeatRows, releaseHold, seatStreamUrl } from "@/lib/client-api";
 import { formatLKR } from "@/lib/format";
 import type { Seat, SeatRow, Tier } from "@/lib/types";
 
-const POLL_MS = 5000;
+// Safety net only: live changes arrive instantly over Server-Sent Events.
+const FALLBACK_POLL_MS = 30000;
 
 interface Props {
   showId: number;
@@ -19,8 +21,9 @@ interface Props {
 
 /**
  * Live seat map.
- * - Polls GET /api/shows/{id}/seats every 5s so seats other people take turn grey.
- *   (Phase 2b: replace polling with a WebSocket push.)
+ * - Subscribes to GET /api/shows/{id}/seats/stream (Server-Sent Events). When anyone holds,
+ *   releases, or lets a hold expire, the change is pushed here instantly.
+ * - On (re)connect it re-fetches the full map once, so nothing missed while offline is lost.
  * - "Hold seats" -> POST /api/holds. The backend holds all seats or none (Redis Lua);
  *   a 409 means someone was faster, so we drop those seats and refresh.
  */
@@ -30,6 +33,11 @@ export function SeatMap({ showId, initialRows, tiers, maxSeats }: Props) {
   const [selected, setSelected] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [live, setLive] = useState(false);
+  const rowsRef = useRef(rows);
+  useEffect(() => {
+    rowsRef.current = rows;
+  }, [rows]);
 
   const tierById = useMemo(() => Object.fromEntries(tiers.map((t) => [t.id, t])), [tiers]);
   const seatById = useMemo(() => {
@@ -59,10 +67,50 @@ export function SeatMap({ showId, initialRows, tiers, maxSeats }: Props) {
     releaseHold(previous).then(refresh);
   }, [refresh]);
 
+  /** Apply one pushed change: e.g. seats 621,622 -> HELD. */
+  const applyUpdate = useCallback((u: ApiSeatUpdate) => {
+    const ids = new Set(u.seatIds);
+    const status = SEAT_STATUS[u.status];
+    setRows((cur) =>
+      cur.map((r) => ({
+        ...r,
+        seats: r.seats.map((s) => (s.showSeatId !== undefined && ids.has(s.showSeatId) ? { ...s, status } : s)),
+      })),
+    );
+    if (status !== "available") {
+      const lostLabels = rowsRef.current
+        .flatMap((r) => r.seats)
+        .filter((s) => s.showSeatId !== undefined && ids.has(s.showSeatId))
+        .map((s) => s.id);
+      setSelected((cur) => {
+        const lost = cur.filter((id) => lostLabels.includes(id));
+        if (lost.length) setNotice(`Seat ${lost.join(", ")} was just taken by someone else.`);
+        return lost.length ? cur.filter((id) => !lost.includes(id)) : cur;
+      });
+    }
+  }, []);
+
   useEffect(() => {
-    const id = setInterval(refresh, POLL_MS);
-    return () => clearInterval(id);
-  }, [refresh]);
+    const source = new EventSource(seatStreamUrl(showId));
+    source.addEventListener("ready", () => {
+      setLive(true);
+      refresh(); // re-sync after connect / reconnect
+    });
+    source.addEventListener("seats", (e) => {
+      try {
+        applyUpdate(JSON.parse((e as MessageEvent<string>).data) as ApiSeatUpdate);
+      } catch {
+        /* ignore a malformed message */
+      }
+    });
+    source.onerror = () => setLive(false); // EventSource reconnects by itself
+
+    const fallback = setInterval(refresh, FALLBACK_POLL_MS);
+    return () => {
+      source.close();
+      clearInterval(fallback);
+    };
+  }, [showId, refresh, applyUpdate]);
 
   const picked = selected
     .filter((id) => seatById[id])
@@ -104,7 +152,16 @@ export function SeatMap({ showId, initialRows, tiers, maxSeats }: Props) {
   return (
     <div className="mx-auto flex max-w-7xl flex-wrap items-start gap-8 px-6 pb-16 pt-8">
       <main className="flex min-w-0 flex-[999_1_640px] flex-col gap-7 rounded-[20px] border border-line bg-surface p-6 sm:p-8">
-        <Legend tiers={tiers} />
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <Legend tiers={tiers} />
+          <span
+            className={`flex items-center gap-2 text-sm ${live ? "text-ok" : "text-muted"}`}
+            aria-live="polite"
+          >
+            <span className={`h-2 w-2 rounded-full ${live ? "animate-pulse bg-ok" : "bg-muted"}`} />
+            {live ? "Live updates on" : "Connecting…"}
+          </span>
+        </div>
 
         <div className="overflow-x-auto">
           <div className="flex min-w-[640px] flex-col items-center gap-2.5">

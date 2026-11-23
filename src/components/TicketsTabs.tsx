@@ -25,7 +25,9 @@ export function TicketsTabs({ bookings }: { bookings: Booking[] }) {
 
       <div role="tabpanel" className="flex flex-col gap-6">
         {list.length === 0 && (
-          <p className="rounded-2xl border border-dashed border-line-strong p-8 text-center text-muted">No bookings here yet.</p>
+          <p className="rounded-2xl border border-dashed border-line-strong p-8 text-center text-muted">
+            {tab === "upcoming" ? "No upcoming bookings yet." : "No past bookings."}
+          </p>
         )}
         {list.map((b) => (
           <article key={b.id} className="flex flex-wrap overflow-hidden rounded-[18px] border border-line bg-surface">
@@ -46,16 +48,18 @@ export function TicketsTabs({ bookings }: { bookings: Booking[] }) {
               {b.upcoming ? (
                 <>
                   <Link
-                    href={`/booking/${b.id}?event=${b.eventId}&seats=C7,C8`}
+                    href={`/booking/${b.id}`}
                     className="rounded-[10px] bg-accent px-[18px] py-3 text-[15px] font-bold text-accent-ink hover:bg-accent-hover"
                   >
-                    View QR
+                    View tickets
                   </Link>
                   <button type="button" className="rounded-[10px] border border-line-soft px-4 py-3 text-[15px] hover:border-soft">PDF</button>
                   <button type="button" className="px-2 py-3 text-sm text-muted underline hover:text-ink">Request cancel</button>
                 </>
               ) : (
-                <button type="button" className="rounded-[10px] border border-line-soft px-4 py-3 text-[15px] hover:border-soft">Receipt</button>
+                <Link href={`/booking/${b.id}`} className="rounded-[10px] border border-line-soft px-4 py-3 text-[15px] hover:border-soft">
+                  Receipt
+                </Link>
               )}
             </div>
           </article>
